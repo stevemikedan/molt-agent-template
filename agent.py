@@ -180,8 +180,29 @@ def _first_run_setup(state: dict) -> None:
 # Main cycle
 # ---------------------------------------------------------------------------
 
+def _is_claimed() -> bool:
+    """Return True if this agent has been claimed by its owner. Logs clearly if not."""
+    try:
+        status_data = moltbook.get_agent_status()
+        agent_status = status_data.get("status", "")
+        if agent_status == "pending_claim":
+            log.warning(
+                "Agent is pending_claim — post the verification tweet and visit your claim URL "
+                "to activate. Skipping this cycle."
+            )
+            return False
+        return True
+    except Exception as exc:
+        log.warning("Could not check agent status: %s. Proceeding anyway.", exc)
+        return True  # Don't block on status check failure
+
+
 def run_cycle() -> None:
     log.info("--- Cycle start ---")
+
+    # Don't attempt to post until the agent has been claimed
+    if not _is_claimed():
+        return
 
     state = memory.load()
     memory.set_last_run(state)
