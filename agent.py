@@ -383,6 +383,23 @@ def _run_with_jitter() -> None:
     schedule.every(next_minutes).minutes.do(_run_with_jitter).tag("cycle")
 
 
+def _fetch_heartbeat() -> None:
+    """
+    Fetch Moltbook's heartbeat instructions and log them.
+    This file tells the agent what to check on each cycle.
+    Failure is non-fatal — the agent continues normally.
+    """
+    try:
+        import httpx
+        resp = httpx.get("https://www.moltbook.com/heartbeat.md", timeout=10.0)
+        if resp.is_success:
+            log.info("Heartbeat instructions:\n%s", resp.text[:2000])
+        else:
+            log.warning("Could not fetch heartbeat.md (status %d)", resp.status_code)
+    except Exception as exc:
+        log.warning("Heartbeat fetch failed: %s", exc)
+
+
 def main() -> None:
     api_key = os.getenv("MOLTBOOK_API_KEY", "")
     if not api_key or api_key == "moltbook_xxx_your_key_here":
@@ -390,6 +407,7 @@ def main() -> None:
         sys.exit(1)
 
     log.info("%s agent starting.", AGENT_NAME)
+    _fetch_heartbeat()
 
     # Run immediately on start
     run_cycle()
