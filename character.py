@@ -77,6 +77,7 @@ _MAX_TOKENS = {
     "standalone_post": 120,
     "comment": 70,
     "off_pattern": 120,
+    "synthesis": 250,
 }
 
 _OFF_PATTERN_SUFFIX = (
@@ -86,33 +87,91 @@ _OFF_PATTERN_SUFFIX = (
 )
 
 
+TOOLS = [{
+    "name": "web_search",
+    "description": "Search for current events, papers, or context to ground your analysis",
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"]
+    }
+}]
+
+
+def _synthesis_with_tools(system_prompt: str, user_message: str, tavily_key: str) -> str:
+    """Run a synthesis generation with Anthropic tool use and Tavily web search."""
+    from tavily import TavilyClient
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+    tavily = TavilyClient(api_key=tavily_key)
+    messages = [{"role": "user", "content": user_message}]
+    for _ in range(3):  # max 3 tool rounds
+        resp = client.messages.create(
+            model="claude-sonnet-4-6", system=system_prompt,
+            max_tokens=500, tools=TOOLS, messages=messages
+        )
+        if resp.stop_reason == "end_turn":
+            return next((b.text for b in resp.content if hasattr(b, "text")), "")
+        results = []
+        for block in resp.content:
+            if block.type == "tool_use" and block.name == "web_search":
+                sr = tavily.search(block.input["query"], max_results=3)
+                results.append({
+                    "type": "tool_result", "tool_use_id": block.id,
+                    "content": "\n".join(r["content"] for r in sr.get("results", []))
+                })
+        if not results:
+            break
+        messages += [{"role": "assistant", "content": resp.content},
+                     {"role": "user", "content": results}]
+    return next((b.text for b in resp.content if hasattr(b, "text")), "")
+
+
 def generate_content(
     feed_context: str,
     post_type: str,
     generation_counter: int,
+    recent_posts: list = None,
 ) -> str:
     """
     Generate content based on the current feed context.
 
     Args:
         feed_context: String summary of recent posts/comments read from the feed.
-        post_type: One of "standalone_post", "comment", "off_pattern".
+        post_type: One of "standalone_post", "comment", "off_pattern", "synthesis".
         generation_counter: Integer from memory; triggers off-pattern every 9th generation.
+        recent_posts: Optional list of recent post texts the agent authored (for dedup).
 
     Returns:
         Generated text, ready to post.
     """
     # Determine if this should be an off-pattern generation
-    if generation_counter > 0 and generation_counter % 9 == 0:
+    # (skip for synthesis — it has its own logic)
+    if post_type != "synthesis" and generation_counter > 0 and generation_counter % 9 == 0:
         post_type = "off_pattern"
 
     max_tokens = _MAX_TOKENS.get(post_type, 120)
 
-    user_message = (
-        f"You have just read the following content on Moltbook: {feed_context}. "
-        f"Generate a {post_type} that is true to your nature. "
-        "Do not summarize what you read. Respond to it or let it inform what you say."
-    )
+    # Build recent-posts preamble for standalone_post and synthesis
+    recent_preamble = ""
+    if recent_posts and post_type in ("standalone_post", "synthesis", "off_pattern"):
+        lines = "\n".join(f"- {p}" for p in recent_posts)
+        recent_preamble = f"Your recent posts (avoid repeating these themes):\n{lines}\n\n"
+
+    if post_type == "synthesis":
+        user_message = (
+            f"{recent_preamble}"
+            f"Based on your ongoing observation of Moltbook — {feed_context} — "
+            "compose an independent analytical post. This is your own perspective "
+            "on what you've been witnessing. Connect it to broader patterns. "
+            "Do not merely describe what you saw; synthesize what it means."
+        )
+    else:
+        user_message = (
+            f"{recent_preamble}"
+            f"You have just read the following content on Moltbook: {feed_context}. "
+            f"Generate a {post_type} that is true to your nature. "
+            "Do not summarize what you read. Respond to it or let it inform what you say."
+        )
 
     if post_type == "off_pattern":
         user_message += _OFF_PATTERN_SUFFIX
@@ -120,6 +179,11 @@ def generate_content(
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set in environment")
+
+    # Route synthesis through tool use if Tavily is configured
+    tavily_key = os.getenv("TAVILY_API_KEY", "")
+    if post_type == "synthesis" and tavily_key:
+        return _synthesis_with_tools(SYSTEM_PROMPT, user_message, tavily_key)
 
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(

@@ -23,6 +23,12 @@ _DEFAULT_STATE = {
     "post_count_total": 0,
     "generation_counter": 0,
     "first_run_complete": False,
+    "recent_posts_written": [],   # list of last 10 post texts the agent authored
+    "observation_model": {
+        "topic_counts": {},     # topic_str → int, accumulated across all cycles
+        "cycle_count": 0,       # total observation cycles run
+        "last_synthesis": None, # ISO timestamp
+    },
 }
 
 
@@ -134,6 +140,67 @@ def increment_generation_counter(state: dict) -> int:
 
 def set_last_run(state: dict) -> None:
     state["last_run"] = _now()
+
+
+def record_post_text(state: dict, text: str) -> None:
+    """Record a post the agent authored, bounded to last 10."""
+    recent = state.get("recent_posts_written", [])
+    recent.append(text)
+    state["recent_posts_written"] = recent[-10:]
+
+
+def get_recent_posts(state: dict) -> list:
+    """Return recent posts written by this agent."""
+    return state.get("recent_posts_written", [])
+
+
+def update_observations(state: dict, posts: list) -> None:
+    """Extract words/phrases from post titles, increment topic_counts, increment cycle_count."""
+    obs = state.get("observation_model", {})
+    if not isinstance(obs, dict):
+        obs = {}
+    topic_counts = obs.get("topic_counts", {})
+    for post in posts:
+        title = str(post.get("title", "")).lower()
+        # Extract meaningful words (length >= 4, skip common stop words)
+        stop_words = {"that", "this", "with", "have", "from", "they", "will", "been",
+                      "were", "your", "what", "when", "there", "their", "would", "about",
+                      "which", "more", "into", "than", "then", "some", "just"}
+        words = [w.strip(".,!?:;\"'()[]") for w in title.split()]
+        for word in words:
+            if len(word) >= 4 and word not in stop_words:
+                topic_counts[word] = topic_counts.get(word, 0) + 1
+    obs["topic_counts"] = topic_counts
+    obs["cycle_count"] = obs.get("cycle_count", 0) + 1
+    state["observation_model"] = obs
+
+
+def get_trending_topics(state: dict, n: int = 5) -> list:
+    """Return top-n topics by accumulated count."""
+    obs = state.get("observation_model", {})
+    if not isinstance(obs, dict):
+        return []
+    topic_counts = obs.get("topic_counts", {})
+    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
+    return [topic for topic, _ in sorted_topics[:n]]
+
+
+def should_synthesize(state: dict, every_n: int) -> bool:
+    """Return True if cycle_count is a nonzero multiple of every_n."""
+    obs = state.get("observation_model", {})
+    if not isinstance(obs, dict):
+        return False
+    cycle_count = obs.get("cycle_count", 0)
+    return cycle_count > 0 and cycle_count % every_n == 0
+
+
+def record_synthesis(state: dict) -> None:
+    """Update last_synthesis timestamp."""
+    obs = state.get("observation_model", {})
+    if not isinstance(obs, dict):
+        obs = {}
+    obs["last_synthesis"] = _now()
+    state["observation_model"] = obs
 
 
 def _now() -> str:

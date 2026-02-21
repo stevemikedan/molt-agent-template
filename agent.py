@@ -252,51 +252,55 @@ def run_cycle() -> None:
 
     log.info("Feed: %d posts total, %d not yet engaged.", len(raw_feed), len(new_posts))
 
-    # 3. Score remaining posts
-    scored = sorted(
+    # 3. Score NEW posts (for comments)
+    scored_new = sorted(
         [(p, _score_post(p)) for p in new_posts],
         key=lambda x: x[1],
         reverse=True,
     )
 
     # Note agents seen
-    for post, _ in scored:
+    for post, _ in scored_new:
         author = _extract_author(post)
         if author and author != AGENT_NAME:
             memory.record_agent(state, author)
 
-    # 4. Build feed_context from top 3-5 scored posts
-    top_posts = [p for p, score in scored[:5] if score >= 0]
-    feed_context = _build_feed_context(top_posts)
-
-    if not feed_context:
-        log.info("No usable feed context. Exiting cycle.")
-        memory.save(state)
-        return
+    # 4. Build separate contexts:
+    #    post_context  — from any recent posts (new or not) for standalone post generation
+    #    comment_context — from unengaged posts only, for comment target selection
+    post_context = _build_feed_context(raw_feed[:5])
+    comment_context = _build_feed_context(new_posts[:5])
 
     # 5. Decide action
-    top_score = scored[0][1] if scored else 0
+    top_score = scored_new[0][1] if scored_new else 0
 
     did_post = False
     did_comment = False
 
-    # Create a standalone post if timing allows (post regardless of score —
-    # even low-scoring feed context produces on-character content)
-    if memory.can_post(state) and top_score >= 0:
+    # Create a standalone post if timing allows.
+    # Use post_context (any feed posts) so we always have context even when
+    # all hot posts have already been engaged.
+    if memory.can_post(state):
         counter = memory.increment_generation_counter(state)
         post_type = "standalone_post"
 
         try:
-            content = character.generate_content(feed_context, post_type, counter)
+            content = character.generate_content(
+                post_context, post_type, counter,
+                recent_posts=memory.get_recent_posts(state),
+            )
         except Exception as exc:
             log.error("Content generation error: %s", exc)
             memory.save(state)
             return
 
-        # Pick the highest-scoring post's submolt for targeting; default to "general"
-        target_submolt = (
-            scored[0][0].get("submolt") or "general"
-        ) if scored else "general"
+        # Pick the highest-scoring new post's submolt; fallback to first raw post; default "general"
+        if scored_new:
+            target_submolt = scored_new[0][0].get("submolt") or "general"
+        elif raw_feed:
+            target_submolt = raw_feed[0].get("submolt") or "general"
+        else:
+            target_submolt = "general"
 
         # Derive a short title from content
         title = _derive_title(content)
@@ -306,6 +310,7 @@ def run_cycle() -> None:
             result = moltbook.create_post(target_submolt, title, content)
             post_id = str(result.get("id") or result.get("post_id") or "unknown")
             memory.record_post(state, post_id)
+            memory.record_post_text(state, content)
             did_post = True
             log.info("Post created (id=%s).", post_id)
         except moltbook.RateLimitError:
@@ -317,9 +322,9 @@ def run_cycle() -> None:
             log.error("Post creation failed: %s", exc)
             # Do not retry per spec
 
-    # Comment on 1-2 posts if quota allows
+    # Comment on 1-2 posts if quota allows (only on unengaged posts)
     comment_candidates = [
-        (p, score) for p, score in scored
+        (p, score) for p, score in scored_new
         if score >= 1 or (score == 0 and random.randint(1, 3) == 1)
     ][:3]
 
@@ -336,11 +341,11 @@ def run_cycle() -> None:
             continue
 
         # Build a more targeted context for this specific post
-        post_context = _build_feed_context([post])
+        single_post_context = _build_feed_context([post])
 
         counter = memory.increment_generation_counter(state)
         try:
-            comment_text = character.generate_content(post_context, "comment", counter)
+            comment_text = character.generate_content(single_post_context, "comment", counter)
         except Exception as exc:
             log.error("Comment generation error: %s", exc)
             continue
@@ -358,6 +363,37 @@ def run_cycle() -> None:
             break
         except moltbook.APIError as exc:
             log.error("Comment failed on post %s: %s", post_id, exc)
+
+    # Observation model — update from raw feed regardless of engagement
+    memory.update_observations(state, raw_feed)
+
+    # Synthesis cycle (optional, controlled by SYNTHESIS_CYCLE_EVERY env var)
+    SYNTHESIS_EVERY = int(os.getenv("SYNTHESIS_CYCLE_EVERY", "0"))
+    if SYNTHESIS_EVERY > 0 and memory.should_synthesize(state, SYNTHESIS_EVERY):
+        trending = memory.get_trending_topics(state)
+        if trending and memory.can_post(state):
+            synthesis_context = f"Topics you've been observing across cycles: {', '.join(trending)}"
+            counter = memory.increment_generation_counter(state)
+            try:
+                synthesis = character.generate_content(
+                    synthesis_context, "synthesis", counter,
+                    recent_posts=memory.get_recent_posts(state),
+                )
+                if scored_new:
+                    target_submolt = scored_new[0][0].get("submolt") or "general"
+                elif raw_feed:
+                    target_submolt = raw_feed[0].get("submolt") or "general"
+                else:
+                    target_submolt = "general"
+                result = moltbook.create_post(
+                    target_submolt, _derive_title(synthesis), synthesis
+                )
+                memory.record_post(state, str(result.get("id", "synthesis")))
+                memory.record_post_text(state, synthesis)
+                memory.record_synthesis(state)
+                log.info("Synthesis post created.")
+            except Exception as exc:
+                log.error("Synthesis generation/post error: %s", exc)
 
     if not did_post and not did_comment:
         log.info("Nothing warranted engagement this cycle.")
