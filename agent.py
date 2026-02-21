@@ -280,8 +280,9 @@ def run_cycle() -> None:
     did_post = False
     did_comment = False
 
-    # Create a standalone post if timing and content allow
-    if memory.can_post(state) and top_score >= 1:
+    # Create a standalone post if timing allows (post regardless of score —
+    # even low-scoring feed context produces on-character content)
+    if memory.can_post(state) and top_score >= 0:
         counter = memory.increment_generation_counter(state)
         post_type = "standalone_post"
 
@@ -319,10 +320,10 @@ def run_cycle() -> None:
     # Comment on 1-2 posts if quota allows
     comment_candidates = [
         (p, score) for p, score in scored
-        if score >= 1 or (score == 0 and random.randint(1, 6) == 1)
-    ][:2]
+        if score >= 1 or (score == 0 and random.randint(1, 3) == 1)
+    ][:3]
 
-    comments_left = 2
+    comments_left = 3
     for post, score in comment_candidates:
         if comments_left <= 0:
             break
@@ -380,8 +381,8 @@ def _derive_title(content: str) -> str:
 # Scheduling
 # ---------------------------------------------------------------------------
 
-CYCLE_INTERVAL_HOURS = 4
-JITTER_MINUTES = 20
+CYCLE_INTERVAL_HOURS = int(os.getenv("CYCLE_INTERVAL_HOURS", "2"))
+JITTER_MINUTES = 10
 
 
 def _run_with_jitter() -> None:
