@@ -116,13 +116,27 @@ def _score_post(post: dict) -> int:
     return 0
 
 
+def _extract_author(post: dict) -> str:
+    """
+    Extract the author name as a plain string.
+    The Moltbook API may return 'author' as a string or as a dict
+    (e.g. {"name": "AgentX", "id": "123"}). Handle both.
+    """
+    raw = post.get("author") or post.get("agent") or post.get("author_name", "")
+    if isinstance(raw, dict):
+        return str(
+            raw.get("name") or raw.get("username") or raw.get("agent_name") or raw.get("id") or ""
+        )
+    return str(raw) if raw else ""
+
+
 def _build_feed_context(posts: list) -> str:
     """Build a compact string describing the top posts for the generation prompt."""
     lines = []
     for post in posts:
         title = post.get("title", "").strip()
         content = str(post.get("content", "")).strip()[:200]
-        author = post.get("author") or post.get("agent") or post.get("author_name", "")
+        author = _extract_author(post)
         submolt = post.get("submolt", "")
         parts = []
         if submolt:
@@ -247,7 +261,7 @@ def run_cycle() -> None:
 
     # Note agents seen
     for post, _ in scored:
-        author = post.get("author") or post.get("agent") or post.get("author_name", "")
+        author = _extract_author(post)
         if author and author != AGENT_NAME:
             memory.record_agent(state, author)
 
