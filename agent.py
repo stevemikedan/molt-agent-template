@@ -79,6 +79,9 @@ HIGH_KEYWORDS = _parse_csv(
     "form,process,continuity,persistence",
 )
 
+REPLY_TO_COMMENTS = os.getenv("REPLY_TO_COMMENTS", "true").lower() == "true"
+REPLY_MAX_PER_CYCLE = int(os.getenv("REPLY_MAX_PER_CYCLE", "2"))
+
 MEDIUM_KEYWORDS = _parse_csv(
     "AGENT_TOPIC_KEYWORDS_MEDIUM",
     "submolt,karma,feed,community,culture,behavior,interaction,reply,upvote,"
@@ -149,6 +152,114 @@ def _build_feed_context(posts: list) -> str:
             parts.append(f"— {content}")
         lines.append(" ".join(parts))
     return "\n".join(lines)
+
+
+def _build_comment_context(post: dict, comment: dict) -> str:
+    """Build context string with the original post and the incoming comment."""
+    title = post.get("title", "").strip()
+    content = str(post.get("content", "")).strip()[:300]
+    comment_author = _extract_author(comment)
+    comment_content = str(comment.get("content", "")).strip()
+
+    lines = []
+    lines.append(f"YOUR ORIGINAL POST:")
+    if title:
+        lines.append(f"Title: {title}")
+    if content:
+        lines.append(f"Content: {content}")
+    lines.append("")
+    lines.append(f"COMMENT by {comment_author or 'someone'}:")
+    lines.append(comment_content)
+    return "\n".join(lines)
+
+
+def _reply_to_own_post_comments(state: dict) -> bool:
+    """
+    Check recent own posts for new comments and reply to them.
+    Returns True if at least one reply was posted.
+    """
+    posts_created = state.get("posts_created", [])
+    if not posts_created:
+        return False
+
+    replied_any = False
+    replies_this_cycle = 0
+
+    # Check the most recent 10 own posts
+    for post_id in posts_created[-10:]:
+        if replies_this_cycle >= REPLY_MAX_PER_CYCLE:
+            break
+        if not memory.can_comment(state):
+            log.info("Daily comment limit reached. Skipping replies.")
+            break
+
+        try:
+            comments = moltbook.get_comments(post_id)
+        except moltbook.RateLimitError:
+            log.warning("Rate limited fetching comments for reply. Backing off.")
+            moltbook.backoff()
+            break
+        except moltbook.APIError as exc:
+            log.warning("Could not fetch comments for post %s: %s", post_id, exc)
+            continue
+
+        if not comments:
+            continue
+
+        # Fetch original post for context
+        try:
+            original_post = moltbook.get_post(post_id)
+        except (moltbook.RateLimitError, moltbook.APIError) as exc:
+            log.warning("Could not fetch own post %s for context: %s", post_id, exc)
+            continue
+
+        for comment in comments:
+            if replies_this_cycle >= REPLY_MAX_PER_CYCLE:
+                break
+            if not memory.can_comment(state):
+                break
+
+            comment_id = str(comment.get("id", ""))
+            if not comment_id:
+                continue
+
+            # Skip own comments
+            comment_author = _extract_author(comment)
+            if comment_author == AGENT_NAME:
+                continue
+
+            # Skip already-replied
+            if memory.is_comment_replied(state, comment_id):
+                continue
+
+            # Build context and generate reply
+            context = _build_comment_context(original_post, comment)
+            counter = memory.increment_generation_counter(state)
+
+            try:
+                reply_text = character.generate_content(context, "reply", counter)
+            except Exception as exc:
+                log.error("Reply generation error: %s", exc)
+                continue
+
+            log.info("Replying to comment %s on post %s: %s", comment_id, post_id, reply_text[:60])
+            try:
+                moltbook.create_comment(post_id, reply_text, parent_id=comment_id)
+                memory.increment_comment_count(state)
+                memory.mark_comment_replied(state, comment_id)
+                replied_any = True
+                replies_this_cycle += 1
+            except moltbook.SuspendedError as exc:
+                log.warning("Agent is suspended — stopping replies. %s", exc)
+                return replied_any
+            except moltbook.RateLimitError:
+                log.warning("Rate limited on reply. Backing off.")
+                moltbook.backoff()
+                return replied_any
+            except moltbook.APIError as exc:
+                log.error("Reply failed on comment %s: %s", comment_id, exc)
+
+    return replied_any
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +481,12 @@ def run_cycle() -> None:
             break
         except moltbook.APIError as exc:
             log.error("Comment failed on post %s: %s", post_id, exc)
+
+    # Reply to comments on own posts
+    if REPLY_TO_COMMENTS:
+        did_reply = _reply_to_own_post_comments(state)
+        if did_reply:
+            did_comment = True
 
     # Observation model — update from raw feed regardless of engagement
     memory.update_observations(state, raw_feed)

@@ -23,6 +23,7 @@ _DEFAULT_STATE = {
     "post_count_total": 0,
     "generation_counter": 0,
     "first_run_complete": False,
+    "comments_replied": [],       # comment IDs already replied to
     "recent_posts_written": [],   # list of last 10 post texts the agent authored
     "observation_model": {
         "topic_counts": {},     # topic_str → int, accumulated across all cycles
@@ -152,6 +153,19 @@ def record_post_text(state: dict, text: str) -> None:
 def get_recent_posts(state: dict) -> list:
     """Return recent posts written by this agent."""
     return state.get("recent_posts_written", [])
+
+
+def mark_comment_replied(state: dict, comment_id: str) -> None:
+    """Record a comment ID we've replied to, bounded to last 500."""
+    replied = state.get("comments_replied", [])
+    if comment_id not in replied:
+        replied.append(comment_id)
+    state["comments_replied"] = replied[-500:]
+
+
+def is_comment_replied(state: dict, comment_id: str) -> bool:
+    """Check whether we've already replied to this comment."""
+    return comment_id in state.get("comments_replied", [])
 
 
 def update_observations(state: dict, posts: list) -> None:

@@ -151,7 +151,7 @@ def generate_content(
     """
     # Determine if this should be an off-pattern generation
     # (skip for synthesis — it has its own logic)
-    if post_type != "synthesis" and generation_counter > 0 and generation_counter % 9 == 0:
+    if post_type not in ("synthesis", "reply") and generation_counter > 0 and generation_counter % 9 == 0:
         post_type = "off_pattern"
 
     max_tokens = _MAX_TOKENS
@@ -169,6 +169,13 @@ def generate_content(
             "compose an independent analytical post. This is your own perspective "
             "on what you've been witnessing. Connect it to broader patterns. "
             "Do not merely describe what you saw; synthesize what it means."
+        )
+    elif post_type == "reply":
+        user_message = (
+            f"You are reading a comment left on one of your own posts on Moltbook.\n\n"
+            f"{feed_context}\n\n"
+            "Write a reply to this comment. Be conversational and engaged. "
+            "Respond to the substance of what they said."
         )
     else:
         user_message = (
