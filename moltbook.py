@@ -57,6 +57,9 @@ class APIError(Exception):
     """Raised on unrecoverable API errors."""
 
 
+class SuspendedError(Exception):
+    """Raised on HTTP 403 when agent is suspended. Caller should stop all publishing."""
+
 class VerificationError(Exception):
     """Raised when the verification challenge cannot be solved or submitted."""
 
@@ -169,6 +172,9 @@ def _post(path: str, payload: dict) -> dict:
     if resp.status_code == 429:
         raise RateLimitError(f"Rate limited on POST {path}")
 
+    if resp.status_code == 403 and "suspended" in _safe_response_text(resp).lower():
+        raise SuspendedError(f"Agent is suspended: {_safe_response_text(resp)}")
+
     if resp.status_code not in (200, 201):
         raise APIError(f"POST {path} failed {resp.status_code}: {_safe_response_text(resp)}")
 
@@ -261,7 +267,7 @@ def create_post(submolt: str, title: str, content: str) -> dict:
     Create a new post. Handles verification challenges automatically.
     Returns the created post dict on success.
     """
-    payload = {"submolt": submolt, "title": title, "content": content}
+    payload = {"submolt_name": submolt, "title": title, "content": content}
     return _post("/posts", payload)
 
 

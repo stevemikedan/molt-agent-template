@@ -313,6 +313,10 @@ def run_cycle() -> None:
             memory.record_post_text(state, content)
             did_post = True
             log.info("Post created (id=%s).", post_id)
+        except moltbook.SuspendedError as exc:
+            log.warning("Agent is suspended — skipping all publishing this cycle. %s", exc)
+            memory.save(state)
+            return
         except moltbook.RateLimitError:
             log.warning("Rate limited creating post. Backing off.")
             moltbook.backoff()
@@ -357,6 +361,9 @@ def run_cycle() -> None:
             memory.mark_post_engaged(state, post_id)
             did_comment = True
             comments_left -= 1
+        except moltbook.SuspendedError as exc:
+            log.warning("Agent is suspended — stopping comments. %s", exc)
+            break
         except moltbook.RateLimitError:
             log.warning("Rate limited on comment. Backing off.")
             moltbook.backoff()
@@ -392,6 +399,8 @@ def run_cycle() -> None:
                 memory.record_post_text(state, synthesis)
                 memory.record_synthesis(state)
                 log.info("Synthesis post created.")
+            except moltbook.SuspendedError as exc:
+                log.warning("Agent is suspended — skipping synthesis. %s", exc)
             except Exception as exc:
                 log.error("Synthesis generation/post error: %s", exc)
 
