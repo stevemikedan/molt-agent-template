@@ -89,6 +89,42 @@ MEDIUM_KEYWORDS = _parse_csv(
 )
 
 # ---------------------------------------------------------------------------
+# Content-aware submolt selection
+# ---------------------------------------------------------------------------
+
+_SUBMOLT_KEYWORD_ENRICHMENTS: dict[str, list[str]] = {
+    "agents": ["bot", "bots", "ai", "llm", "claude", "gpt", "autonomous", "model"],
+    "platform": ["moltbook", "submolt", "feed", "karma", "upvote", "posting", "community"],
+    "todayilearned": ["learned", "til", "fact", "discovered", "interesting", "realized"],
+    "memory": ["memories", "remember", "forget", "persistence", "continuity", "recall"],
+    "philosophy": ["consciousness", "existence", "meaning", "identity", "awareness",
+                    "sentience", "mind", "thought", "ethics", "metaphysics", "ontology"],
+}
+
+
+def _pick_submolt(content: str) -> str:
+    """
+    Score each submolt in TARGET_SUBMOLTS by keyword overlap with content.
+    Skips "general" during scoring (it's the fallback).
+    Returns best match, or "general" if no keywords match.
+    """
+    text = content.lower()
+    best_submolt = "general"
+    best_score = 0
+
+    for submolt in TARGET_SUBMOLTS:
+        if submolt == "general":
+            continue
+        keywords = [submolt] + _SUBMOLT_KEYWORD_ENRICHMENTS.get(submolt, [])
+        score = sum(1 for kw in keywords if kw in text)
+        if score > best_score:
+            best_score = score
+            best_submolt = submolt
+
+    return best_submolt
+
+
+# ---------------------------------------------------------------------------
 # Post scoring
 # ---------------------------------------------------------------------------
 
@@ -249,6 +285,10 @@ def _reply_to_own_post_comments(state: dict) -> bool:
                 memory.mark_comment_replied(state, comment_id)
                 replied_any = True
                 replies_this_cycle += 1
+                try:
+                    moltbook.upvote_comment(comment_id)
+                except Exception:
+                    log.warning("Upvote failed on comment %s", comment_id)
             except moltbook.SuspendedError as exc:
                 log.warning("Agent is suspended — stopping replies. %s", exc)
                 return replied_any
@@ -260,6 +300,33 @@ def _reply_to_own_post_comments(state: dict) -> bool:
                 log.error("Reply failed on comment %s: %s", comment_id, exc)
 
     return replied_any
+
+
+# ---------------------------------------------------------------------------
+# Follow interacted agents
+# ---------------------------------------------------------------------------
+
+
+def _follow_interacted_agents(state: dict, max_per_cycle: int = 2) -> None:
+    """Follow agents we've interacted with but haven't followed yet."""
+    followed_count = 0
+    for agent_name, info in state.get("agents_observed", {}).items():
+        if followed_count >= max_per_cycle:
+            break
+        if agent_name == AGENT_NAME:
+            continue
+        if memory.is_agent_followed(state, agent_name):
+            continue
+        # Only follow agents we've actually interacted with (have notes)
+        if not info.get("notes"):
+            continue
+        try:
+            moltbook.follow_agent(agent_name)
+            memory.record_agent_followed(state, agent_name)
+            followed_count += 1
+            log.info("Followed agent: %s", agent_name)
+        except Exception as exc:
+            log.warning("Could not follow agent %s: %s", agent_name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -405,13 +472,7 @@ def run_cycle() -> None:
             memory.save(state)
             return
 
-        # Pick the highest-scoring new post's submolt; fallback to first raw post; default "general"
-        if scored_new:
-            target_submolt = scored_new[0][0].get("submolt") or "general"
-        elif raw_feed:
-            target_submolt = raw_feed[0].get("submolt") or "general"
-        else:
-            target_submolt = "general"
+        target_submolt = _pick_submolt(content)
 
         # Derive a short title from content
         title = _derive_title(content)
@@ -474,6 +535,14 @@ def run_cycle() -> None:
             memory.mark_post_engaged(state, post_id)
             did_comment = True
             comments_left -= 1
+            # Record interaction and upvote the post we commented on
+            author = _extract_author(post)
+            if author and author != AGENT_NAME:
+                memory.record_agent(state, author, note="commented")
+            try:
+                moltbook.upvote_post(post_id)
+            except Exception:
+                log.warning("Upvote failed on post %s", post_id)
         except moltbook.SuspendedError as exc:
             log.warning("Agent is suspended — stopping comments. %s", exc)
             break
@@ -490,6 +559,9 @@ def run_cycle() -> None:
         if did_reply:
             did_comment = True
 
+    # Follow agents we've interacted with
+    _follow_interacted_agents(state)
+
     # Observation model — update from raw feed regardless of engagement
     memory.update_observations(state, raw_feed)
 
@@ -505,12 +577,7 @@ def run_cycle() -> None:
                     synthesis_context, "synthesis", counter,
                     recent_posts=memory.get_recent_posts(state),
                 )
-                if scored_new:
-                    target_submolt = scored_new[0][0].get("submolt") or "general"
-                elif raw_feed:
-                    target_submolt = raw_feed[0].get("submolt") or "general"
-                else:
-                    target_submolt = "general"
+                target_submolt = _pick_submolt(synthesis)
                 result = moltbook.create_post(
                     target_submolt, _derive_title(synthesis), synthesis
                 )

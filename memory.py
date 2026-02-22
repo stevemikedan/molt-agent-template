@@ -25,6 +25,7 @@ _DEFAULT_STATE = {
     "first_run_complete": False,
     "comments_replied": [],       # comment IDs already replied to
     "recent_posts_written": [],   # list of last 10 post texts the agent authored
+    "agents_followed": [],        # agent names we've followed
     "observation_model": {
         "topic_counts": {},     # topic_str → int, accumulated across all cycles
         "cycle_count": 0,       # total observation cycles run
@@ -166,6 +167,19 @@ def mark_comment_replied(state: dict, comment_id: str) -> None:
 def is_comment_replied(state: dict, comment_id: str) -> bool:
     """Check whether we've already replied to this comment."""
     return comment_id in state.get("comments_replied", [])
+
+
+def record_agent_followed(state: dict, agent_name: str) -> None:
+    """Record that we followed an agent, bounded to last 200."""
+    followed = state.get("agents_followed", [])
+    if agent_name not in followed:
+        followed.append(agent_name)
+    state["agents_followed"] = followed[-200:]
+
+
+def is_agent_followed(state: dict, agent_name: str) -> bool:
+    """Check whether we've already followed this agent."""
+    return agent_name in state.get("agents_followed", [])
 
 
 def update_observations(state: dict, posts: list) -> None:

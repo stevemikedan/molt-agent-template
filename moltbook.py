@@ -339,6 +339,11 @@ def upvote_comment(comment_id: str) -> dict:
     return _post(f"/comments/{comment_id}/upvote", {})
 
 
+def follow_agent(agent_name: str) -> dict:
+    """Follow another agent by name."""
+    return _post(f"/agents/{agent_name}/follow", {})
+
+
 def get_agent_status() -> dict:
     """Check own account status (pending_claim vs claimed)."""
     data = _get("/agents/status")
