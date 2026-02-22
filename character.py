@@ -5,11 +5,14 @@ The system prompt is the product. Everything else is infrastructure.
 All character configuration is loaded from environment variables.
 """
 
+import logging
 import os
 import re
 
 import anthropic
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -72,13 +75,9 @@ SYSTEM_PROMPT = build_system_prompt()
 # Generation
 # ---------------------------------------------------------------------------
 
-# Max tokens by post type
-_MAX_TOKENS = {
-    "standalone_post": 120,
-    "comment": 70,
-    "off_pattern": 120,
-    "synthesis": 250,
-}
+# Safety ceiling — high enough to never cut off real content.
+# Actual post length is controlled by prompt instructions, not this limit.
+_MAX_TOKENS = 1024
 
 _OFF_PATTERN_SUFFIX = (
     "\n\nThis post should be slightly off your usual register. "
@@ -107,7 +106,7 @@ def _synthesis_with_tools(system_prompt: str, user_message: str, tavily_key: str
     for _ in range(3):  # max 3 tool rounds
         resp = client.messages.create(
             model="claude-sonnet-4-6", system=system_prompt,
-            max_tokens=500, tools=TOOLS, messages=messages
+            max_tokens=_MAX_TOKENS, tools=TOOLS, messages=messages
         )
         if resp.stop_reason == "end_turn":
             return next((b.text for b in resp.content if hasattr(b, "text")), "")
@@ -149,7 +148,7 @@ def generate_content(
     if post_type != "synthesis" and generation_counter > 0 and generation_counter % 9 == 0:
         post_type = "off_pattern"
 
-    max_tokens = _MAX_TOKENS.get(post_type, 120)
+    max_tokens = _MAX_TOKENS
 
     # Build recent-posts preamble for standalone_post and synthesis
     recent_preamble = ""
@@ -157,20 +156,29 @@ def generate_content(
         lines = "\n".join(f"- {p}" for p in recent_posts)
         recent_preamble = f"Your recent posts (avoid repeating these themes):\n{lines}\n\n"
 
+    length_guidance = (
+        "LENGTH & FORMAT: Vary your output naturally. Sometimes a single punchy "
+        "sentence is the right move; other times a few paragraphs are warranted. "
+        "Match length to the substance of what you have to say — don't pad, don't truncate. "
+        "Always finish your thought completely."
+    )
+
     if post_type == "synthesis":
         user_message = (
             f"{recent_preamble}"
             f"Based on your ongoing observation of Moltbook — {feed_context} — "
             "compose an independent analytical post. This is your own perspective "
             "on what you've been witnessing. Connect it to broader patterns. "
-            "Do not merely describe what you saw; synthesize what it means."
+            "Do not merely describe what you saw; synthesize what it means.\n\n"
+            f"{length_guidance}"
         )
     else:
         user_message = (
             f"{recent_preamble}"
             f"You have just read the following content on Moltbook: {feed_context}. "
             f"Generate a {post_type} that is true to your nature. "
-            "Do not summarize what you read. Respond to it or let it inform what you say."
+            "Do not summarize what you read. Respond to it or let it inform what you say.\n\n"
+            f"{length_guidance}"
         )
 
     if post_type == "off_pattern":
@@ -193,5 +201,8 @@ def generate_content(
         temperature=1.0,
         messages=[{"role": "user", "content": user_message}],
     )
+
+    if response.stop_reason == "max_tokens":
+        log.warning("Generation hit max_tokens ceiling (%d) — output may be truncated", max_tokens)
 
     return response.content[0].text.strip()
