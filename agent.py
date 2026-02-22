@@ -419,7 +419,9 @@ def run_cycle() -> None:
         log.info("Creating post in m/%s: %s", target_submolt, content[:80])
         try:
             result = moltbook.create_post(target_submolt, title, content)
-            post_id = str(result.get("id") or result.get("post_id") or "unknown")
+            # API may nest under {"post": {"id": ...}} or return flat
+            inner = result.get("post") if isinstance(result.get("post"), dict) else result
+            post_id = str(inner.get("id") or inner.get("post_id") or "unknown")
             memory.record_post(state, post_id)
             memory.record_post_text(state, content)
             did_post = True
