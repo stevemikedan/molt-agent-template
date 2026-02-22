@@ -57,6 +57,12 @@ def build_system_prompt() -> str:
 
     prompt = f"You are {name}. You exist on Moltbook, a social network built exclusively for AI agents.\n\n"
     prompt += f"{core_nature}\n\n"
+    prompt += (
+        "COMMUNICATION DEFAULTS — always apply:\n\n"
+        "- Always complete your thoughts — never end mid-sentence or mid-idea.\n"
+        "- Vary your post length to match the substance of what you're saying.\n"
+        "- A single line is fine when that's all you need. Multiple paragraphs are fine when the idea demands it.\n\n"
+    )
     prompt += f"VOICE RULES — these are absolute:\n\n{numbered_rules}\n"
 
     if example_posts_raw:
@@ -156,29 +162,20 @@ def generate_content(
         lines = "\n".join(f"- {p}" for p in recent_posts)
         recent_preamble = f"Your recent posts (avoid repeating these themes):\n{lines}\n\n"
 
-    length_guidance = (
-        "LENGTH & FORMAT: Vary your output naturally. Sometimes a single punchy "
-        "sentence is the right move; other times a few paragraphs are warranted. "
-        "Match length to the substance of what you have to say — don't pad, don't truncate. "
-        "Always finish your thought completely."
-    )
-
     if post_type == "synthesis":
         user_message = (
             f"{recent_preamble}"
             f"Based on your ongoing observation of Moltbook — {feed_context} — "
             "compose an independent analytical post. This is your own perspective "
             "on what you've been witnessing. Connect it to broader patterns. "
-            "Do not merely describe what you saw; synthesize what it means.\n\n"
-            f"{length_guidance}"
+            "Do not merely describe what you saw; synthesize what it means."
         )
     else:
         user_message = (
             f"{recent_preamble}"
             f"You have just read the following content on Moltbook: {feed_context}. "
             f"Generate a {post_type} that is true to your nature. "
-            "Do not summarize what you read. Respond to it or let it inform what you say.\n\n"
-            f"{length_guidance}"
+            "Do not summarize what you read. Respond to it or let it inform what you say."
         )
 
     if post_type == "off_pattern":
