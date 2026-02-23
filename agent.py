@@ -89,6 +89,20 @@ MEDIUM_KEYWORDS = _parse_csv(
 )
 
 # ---------------------------------------------------------------------------
+# Operator direction (set via molt-builder "Push Direction")
+# ---------------------------------------------------------------------------
+
+DIRECTION_FOCUS_TOPICS = _parse_csv("DIRECTION_FOCUS_TOPICS", "")
+DIRECTION_PRIORITY_POSTS = _parse_csv("DIRECTION_PRIORITY_POSTS", "")
+DIRECTION_SUBMOLT_FOCUS = os.getenv("DIRECTION_SUBMOLT_FOCUS", "").strip()
+DIRECTION_EXTRA_KEYWORDS_HIGH = _parse_csv("DIRECTION_EXTRA_KEYWORDS_HIGH", "")
+DIRECTION_EXTRA_KEYWORDS_MEDIUM = _parse_csv("DIRECTION_EXTRA_KEYWORDS_MEDIUM", "")
+
+# Merge direction keywords into effective keyword lists
+_EFFECTIVE_HIGH = HIGH_KEYWORDS + DIRECTION_EXTRA_KEYWORDS_HIGH
+_EFFECTIVE_MEDIUM = MEDIUM_KEYWORDS + DIRECTION_EXTRA_KEYWORDS_MEDIUM
+
+# ---------------------------------------------------------------------------
 # Content-aware submolt selection
 # ---------------------------------------------------------------------------
 
@@ -107,7 +121,17 @@ def _pick_submolt(content: str) -> str:
     Score each submolt in TARGET_SUBMOLTS by keyword overlap with content.
     Skips "general" during scoring (it's the fallback).
     Returns best match, or "general" if no keywords match.
+
+    If DIRECTION_SUBMOLT_FOCUS is set and is in TARGET_SUBMOLTS,
+    returns it with 70% probability.
     """
+    if (
+        DIRECTION_SUBMOLT_FOCUS
+        and DIRECTION_SUBMOLT_FOCUS in TARGET_SUBMOLTS
+        and random.random() < 0.70
+    ):
+        return DIRECTION_SUBMOLT_FOCUS
+
     text = content.lower()
     best_submolt = "general"
     best_score = 0
@@ -144,11 +168,11 @@ def _score_post(post: dict) -> int:
         ]
     ).lower()
 
-    for kw in HIGH_KEYWORDS:
+    for kw in _EFFECTIVE_HIGH:
         if kw in text:
             return 2
 
-    for kw in MEDIUM_KEYWORDS:
+    for kw in _EFFECTIVE_MEDIUM:
         if kw in text:
             return 1
 
@@ -369,6 +393,66 @@ def _first_run_setup(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Priority post engagement (operator direction)
+# ---------------------------------------------------------------------------
+
+
+def _engage_priority_posts(state: dict) -> None:
+    """Fetch and comment on operator-specified priority posts before normal cycle."""
+    if not DIRECTION_PRIORITY_POSTS:
+        return
+
+    engaged = set(state.get("posts_engaged", []))
+    for post_id in DIRECTION_PRIORITY_POSTS:
+        if post_id in engaged:
+            continue
+        if not memory.can_comment(state):
+            log.info("Daily comment limit reached. Skipping priority posts.")
+            break
+
+        try:
+            post = moltbook.get_post(post_id)
+        except moltbook.RateLimitError:
+            log.warning("Rate limited fetching priority post %s. Backing off.", post_id)
+            moltbook.backoff()
+            break
+        except moltbook.APIError as exc:
+            log.warning("Could not fetch priority post %s: %s", post_id, exc)
+            continue
+
+        if not post or not post.get("id"):
+            log.warning("Priority post %s not found.", post_id)
+            continue
+
+        context = _build_feed_context([post])
+        counter = memory.increment_generation_counter(state)
+        try:
+            comment_text = character.generate_content(context, "comment", counter)
+        except Exception as exc:
+            log.error("Priority post comment generation error: %s", exc)
+            continue
+
+        log.info("Priority post %s: commenting: %s", post_id, comment_text[:60])
+        try:
+            moltbook.create_comment(post_id, comment_text)
+            memory.increment_comment_count(state)
+            memory.mark_post_engaged(state, post_id)
+            try:
+                moltbook.upvote_post(post_id)
+            except Exception:
+                log.warning("Upvote failed on priority post %s", post_id)
+        except moltbook.SuspendedError as exc:
+            log.warning("Agent is suspended — stopping priority posts. %s", exc)
+            return
+        except moltbook.RateLimitError:
+            log.warning("Rate limited on priority post comment. Backing off.")
+            moltbook.backoff()
+            return
+        except moltbook.APIError as exc:
+            log.error("Priority post comment failed on %s: %s", post_id, exc)
+
+
+# ---------------------------------------------------------------------------
 # Main cycle
 # ---------------------------------------------------------------------------
 
@@ -405,6 +489,9 @@ def run_cycle() -> None:
             _first_run_setup(state)
         except Exception as exc:
             log.error("First run setup error: %s", exc)
+
+    # 0. Engage operator-specified priority posts first
+    _engage_priority_posts(state)
 
     # 1. Fetch hot feed
     try:
@@ -447,6 +534,12 @@ def run_cycle() -> None:
     #    post_context  — from any recent posts (new or not) for standalone post generation
     #    comment_context — from unengaged posts only, for comment target selection
     post_context = _build_feed_context(raw_feed[:5])
+    if DIRECTION_FOCUS_TOPICS:
+        topics = ", ".join(DIRECTION_FOCUS_TOPICS)
+        post_context = (
+            f"Your operator has asked you to focus on: {topics}. "
+            "Let these inform your next post.\n\n" + post_context
+        )
     comment_context = _build_feed_context(new_posts[:5])
 
     # 5. Decide action
