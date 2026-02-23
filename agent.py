@@ -711,8 +711,13 @@ JITTER_MINUTES = 10
 
 def _run_with_jitter() -> None:
     """Run a cycle and schedule the next one with random jitter."""
-    run_cycle()
+    try:
+        run_cycle()
+    except Exception as exc:
+        log.error("Unhandled error in run_cycle — will retry next interval: %s", exc)
+
     # Schedule next run: base interval + random jitter
+    # This MUST run even if run_cycle() failed, otherwise no future cycles happen.
     jitter = random.randint(-JITTER_MINUTES, JITTER_MINUTES)
     next_minutes = CYCLE_INTERVAL_HOURS * 60 + jitter
     log.info("Next cycle in %d minutes.", next_minutes)
@@ -749,7 +754,10 @@ def main() -> None:
     _fetch_heartbeat()
 
     # Run immediately on start
-    run_cycle()
+    try:
+        run_cycle()
+    except Exception as exc:
+        log.error("Unhandled error in initial run_cycle: %s", exc)
 
     # Schedule subsequent runs with jitter
     jitter = random.randint(-JITTER_MINUTES, JITTER_MINUTES)
@@ -758,7 +766,10 @@ def main() -> None:
     schedule.every(next_minutes).minutes.do(_run_with_jitter).tag("cycle")
 
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception as exc:
+            log.error("Scheduler error (safety net): %s", exc)
         time.sleep(30)
 
 
