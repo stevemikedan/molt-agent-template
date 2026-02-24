@@ -10,7 +10,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-STATE_FILE = Path("state.json")
+_STATE_DIR = os.getenv("STATE_DIR", "")
+STATE_FILE = Path(_STATE_DIR) / "state.json" if _STATE_DIR else Path("state.json")
 
 _DEFAULT_STATE = {
     "posts_engaged": [],
