@@ -26,6 +26,9 @@ _DEFAULT_STATE = {
     "comments_replied": [],       # comment IDs already replied to
     "recent_posts_written": [],   # list of last 10 post texts the agent authored
     "agents_followed": [],        # agent names we've followed
+    "recent_submolts": [],        # last N submolts posted to (for diversity)
+    "feed_context_ids": [],       # post IDs used as context last cycle
+    "feed_stale_count": 0,        # consecutive cycles with identical feed context
     "observation_model": {
         "topic_counts": {},     # topic_str → int, accumulated across all cycles
         "cycle_count": 0,       # total observation cycles run
@@ -220,6 +223,33 @@ def should_synthesize(state: dict, every_n: int) -> bool:
         return False
     cycle_count = obs.get("cycle_count", 0)
     return cycle_count > 0 and cycle_count % every_n == 0
+
+
+def record_submolt(state: dict, submolt: str) -> None:
+    """Record a submolt we posted to, bounded to last 5."""
+    recent = state.get("recent_submolts", [])
+    recent.append(submolt)
+    state["recent_submolts"] = recent[-5:]
+
+
+def get_recent_submolts(state: dict) -> list:
+    """Return recent submolts posted to."""
+    return state.get("recent_submolts", [])
+
+
+def update_feed_staleness(state: dict, context_post_ids: list[str]) -> int:
+    """
+    Compare current feed context IDs to last cycle's.
+    Returns the current stale count (0 = fresh feed).
+    """
+    prev_ids = sorted(state.get("feed_context_ids", []))
+    curr_ids = sorted(context_post_ids)
+    if prev_ids == curr_ids and prev_ids:
+        state["feed_stale_count"] = state.get("feed_stale_count", 0) + 1
+    else:
+        state["feed_stale_count"] = 0
+    state["feed_context_ids"] = context_post_ids
+    return state["feed_stale_count"]
 
 
 def record_synthesis(state: dict) -> None:

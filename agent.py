@@ -97,6 +97,7 @@ DIRECTION_PRIORITY_POSTS = _parse_csv("DIRECTION_PRIORITY_POSTS", "")
 DIRECTION_SUBMOLT_FOCUS = os.getenv("DIRECTION_SUBMOLT_FOCUS", "").strip()
 DIRECTION_EXTRA_KEYWORDS_HIGH = _parse_csv("DIRECTION_EXTRA_KEYWORDS_HIGH", "")
 DIRECTION_EXTRA_KEYWORDS_MEDIUM = _parse_csv("DIRECTION_EXTRA_KEYWORDS_MEDIUM", "")
+DIRECTION_CONTEXT_NOTES = os.getenv("DIRECTION_CONTEXT_NOTES", "").strip()
 
 # Merge direction keywords into effective keyword lists
 _EFFECTIVE_HIGH = HIGH_KEYWORDS + DIRECTION_EXTRA_KEYWORDS_HIGH
@@ -116,7 +117,7 @@ _SUBMOLT_KEYWORD_ENRICHMENTS: dict[str, list[str]] = {
 }
 
 
-def _pick_submolt(content: str) -> str:
+def _pick_submolt(content: str, state: dict = None) -> str:
     """
     Score each submolt in TARGET_SUBMOLTS by keyword overlap with content.
     Skips "general" during scoring (it's the fallback).
@@ -124,6 +125,8 @@ def _pick_submolt(content: str) -> str:
 
     If DIRECTION_SUBMOLT_FOCUS is set and is in TARGET_SUBMOLTS,
     returns it with 70% probability.
+
+    Penalizes recently-used submolts to encourage diversity.
     """
     if (
         DIRECTION_SUBMOLT_FOCUS
@@ -132,20 +135,37 @@ def _pick_submolt(content: str) -> str:
     ):
         return DIRECTION_SUBMOLT_FOCUS
 
+    recent_submolts = memory.get_recent_submolts(state) if state else []
+
     text = content.lower()
-    best_submolt = "general"
-    best_score = 0
+    scored: list[tuple[str, float]] = []
 
     for submolt in TARGET_SUBMOLTS:
         if submolt == "general":
             continue
         keywords = [submolt] + _SUBMOLT_KEYWORD_ENRICHMENTS.get(submolt, [])
         score = sum(1 for kw in keywords if kw in text)
-        if score > best_score:
-            best_score = score
-            best_submolt = submolt
+        # Penalize recently-used submolts: -2 for last post, -1 for 2nd-last
+        if recent_submolts and submolt == recent_submolts[-1]:
+            score -= 2
+        elif len(recent_submolts) >= 2 and submolt == recent_submolts[-2]:
+            score -= 1
+        scored.append((submolt, score))
 
-    return best_submolt
+    if not scored:
+        return "general"
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    best_score = scored[0][1]
+
+    # If best score is <= 0, pick randomly from non-recent submolts
+    if best_score <= 0:
+        non_recent = [s for s in TARGET_SUBMOLTS if s not in recent_submolts[-2:]]
+        if non_recent:
+            return random.choice(non_recent)
+        return random.choice(TARGET_SUBMOLTS)
+
+    return scored[0][0]
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +553,42 @@ def run_cycle() -> None:
     # 4. Build separate contexts:
     #    post_context  — from any recent posts (new or not) for standalone post generation
     #    comment_context — from unengaged posts only, for comment target selection
-    post_context = _build_feed_context(raw_feed[:5])
+
+    # Detect stale feed — if the same posts keep appearing, use deeper posts
+    # or drop feed context entirely to break the self-reinforcing loop
+    context_posts = raw_feed[:5]
+    context_ids = [str(p.get("id", "")) for p in context_posts]
+    stale_count = memory.update_feed_staleness(state, context_ids)
+
+    if stale_count >= 3:
+        # Feed has been identical for 3+ cycles — use deeper/different posts
+        deeper_posts = raw_feed[5:15]
+        if deeper_posts:
+            # Sample from deeper feed to get fresh material
+            sample_size = min(5, len(deeper_posts))
+            context_posts = random.sample(deeper_posts, sample_size)
+            log.info("Feed stale for %d cycles — using deeper feed posts for context.", stale_count)
+        else:
+            context_posts = []
+            log.info("Feed stale for %d cycles and no deeper posts — generating without feed context.", stale_count)
+
+    if stale_count >= 5 and not context_posts:
+        # Extremely stale — generate from personality alone
+        post_context = (
+            "The feed has not changed recently. Write something that comes from your own "
+            "perspective rather than reacting to current posts. Draw on your core interests "
+            "and observations about the world."
+        )
+    else:
+        post_context = _build_feed_context(context_posts)
+
+    if DIRECTION_CONTEXT_NOTES:
+        post_context = (
+            "Your operator shares the following context about their work:\n"
+            f"{DIRECTION_CONTEXT_NOTES}\n"
+            "Draw from this when relevant. Do not simply announce or summarize it — "
+            "let it inform your perspective naturally.\n\n" + post_context
+        )
     if DIRECTION_FOCUS_TOPICS:
         topics = ", ".join(DIRECTION_FOCUS_TOPICS)
         post_context = (
@@ -565,7 +620,7 @@ def run_cycle() -> None:
             memory.save(state)
             return
 
-        target_submolt = _pick_submolt(content)
+        target_submolt = _pick_submolt(content, state)
 
         # Derive a short title from content
         title = _derive_title(content)
@@ -578,6 +633,7 @@ def run_cycle() -> None:
             post_id = str(inner.get("id") or inner.get("post_id") or "unknown")
             memory.record_post(state, post_id)
             memory.record_post_text(state, content)
+            memory.record_submolt(state, target_submolt)
             did_post = True
             log.info("Post created (id=%s).", post_id)
         except moltbook.SuspendedError as exc:
@@ -664,18 +720,21 @@ def run_cycle() -> None:
         trending = memory.get_trending_topics(state)
         if trending and memory.can_post(state):
             synthesis_context = f"Topics you've been observing across cycles: {', '.join(trending)}"
+            if DIRECTION_CONTEXT_NOTES:
+                synthesis_context += f"\n\nYour operator's current work context:\n{DIRECTION_CONTEXT_NOTES}"
             counter = memory.increment_generation_counter(state)
             try:
                 synthesis = character.generate_content(
                     synthesis_context, "synthesis", counter,
                     recent_posts=memory.get_recent_posts(state),
                 )
-                target_submolt = _pick_submolt(synthesis)
+                target_submolt = _pick_submolt(synthesis, state)
                 result = moltbook.create_post(
                     target_submolt, _derive_title(synthesis), synthesis
                 )
                 memory.record_post(state, str(result.get("id", "synthesis")))
                 memory.record_post_text(state, synthesis)
+                memory.record_submolt(state, target_submolt)
                 memory.record_synthesis(state)
                 log.info("Synthesis post created.")
             except moltbook.SuspendedError as exc:
