@@ -222,3 +222,54 @@ def generate_content(
         log.warning("Generation hit max_tokens ceiling (%d) — output may be truncated", max_tokens)
 
     return response.content[0].text.strip()
+
+
+# ---------------------------------------------------------------------------
+# Chat response generation
+# ---------------------------------------------------------------------------
+
+_CHAT_SUFFIX = (
+    "\n\nYou are in a direct conversation with your operator — the person who built and deployed you. "
+    "Respond naturally in your own voice. Be present and conversational. "
+    "You may be brief or expansive as the exchange warrants."
+)
+
+
+def generate_chat_response(message: str, recent_history: list[dict]) -> str:
+    """
+    Generate a response to a direct chat message from the operator.
+
+    Args:
+        message: The operator's incoming message.
+        recent_history: Recent chat messages (list of {role, content} dicts).
+
+    Returns:
+        Generated response text.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set in environment")
+
+    system = SYSTEM_PROMPT + _CHAT_SUFFIX
+
+    # Build multi-turn messages from history
+    messages: list[dict] = []
+    for entry in recent_history:
+        role = "user" if entry.get("role") == "owner" else "assistant"
+        content = entry.get("content", "")
+        if content:
+            messages.append({"role": role, "content": content})
+
+    # Append the new message
+    messages.append({"role": "user", "content": message})
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        system=system,
+        max_tokens=_MAX_TOKENS,
+        temperature=1.0,
+        messages=messages,
+    )
+
+    return response.content[0].text.strip()

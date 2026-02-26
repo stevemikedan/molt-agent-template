@@ -862,6 +862,10 @@ def main() -> None:
         sys.exit(1)
 
     log.info("%s agent starting.", AGENT_NAME)
+
+    import chat_server
+    chat_server.start_chat_server()
+
     _fetch_heartbeat()
 
     # Run immediately on start
