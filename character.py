@@ -162,6 +162,16 @@ def generate_content(
         lines = "\n".join(f"- {p}" for p in recent_posts)
         recent_preamble = f"Your recent posts (avoid repeating these themes):\n{lines}\n\n"
 
+    # Posts need a title; comments and replies do not.
+    _needs_title = post_type in ("standalone_post", "synthesis", "off_pattern")
+    _title_instruction = (
+        "\n\nFormat: Start your response with a title line in the format "
+        "TITLE: <your title>\n"
+        "Then a blank line, then your post body.\n"
+        "The title should be concise and evocative — not just the first sentence of your post. "
+        "Think of it as a headline that draws readers in."
+    ) if _needs_title else ""
+
     if post_type == "synthesis":
         user_message = (
             f"{recent_preamble}"
@@ -169,6 +179,7 @@ def generate_content(
             "compose an independent analytical post. This is your own perspective "
             "on what you've been witnessing. Connect it to broader patterns. "
             "Do not merely describe what you saw; synthesize what it means."
+            f"{_title_instruction}"
         )
     elif post_type == "reply":
         user_message = (
@@ -183,6 +194,7 @@ def generate_content(
             f"You have just read the following content on Moltbook: {feed_context}. "
             f"Generate a {post_type} that is true to your nature. "
             "Do not summarize what you read. Respond to it or let it inform what you say."
+            f"{_title_instruction}"
         )
 
     if post_type == "off_pattern":

@@ -286,6 +286,18 @@ def _reply_to_own_post_comments(state: dict) -> bool:
         if not comments:
             continue
 
+        # Platform-side dedup: scan all comments to find which ones we already
+        # replied to. This works even if state.json was wiped, because it checks
+        # the actual comment tree on Moltbook.
+        already_replied_to = set()
+        for c in comments:
+            if _extract_author(c) == AGENT_NAME:
+                parent = str(c.get("parent_id", "") or c.get("parent_comment_id", "") or "")
+                if parent:
+                    already_replied_to.add(parent)
+                    # Backfill state so future cycles can skip the DB check
+                    memory.mark_comment_replied(state, parent)
+
         # Fetch original post for context
         try:
             original_post = moltbook.get_post(post_id)
@@ -308,7 +320,11 @@ def _reply_to_own_post_comments(state: dict) -> bool:
             if comment_author == AGENT_NAME:
                 continue
 
-            # Skip already-replied
+            # Skip already-replied (platform-side check)
+            if comment_id in already_replied_to:
+                continue
+
+            # Skip already-replied (state-based check)
             if memory.is_comment_replied(state, comment_id):
                 continue
 
@@ -620,10 +636,10 @@ def run_cycle() -> None:
             memory.save(state)
             return
 
+        title, body = _parse_title_and_body(content)
+        if body:
+            content = body  # Use the body without the TITLE: prefix
         target_submolt = _pick_submolt(content, state)
-
-        # Derive a short title from content
-        title = _derive_title(content)
 
         log.info("Creating post in m/%s: %s", target_submolt, content[:80])
         try:
@@ -666,6 +682,20 @@ def run_cycle() -> None:
         post_id = str(post.get("id", ""))
         if not post_id or post_id in engaged:
             continue
+
+        # Platform-side dedup: check if we already commented on this post
+        # (guards against state loss / resets)
+        try:
+            existing_comments = moltbook.get_comments(post_id)
+            already_commented = any(
+                _extract_author(c) == AGENT_NAME for c in existing_comments
+            )
+            if already_commented:
+                memory.mark_post_engaged(state, post_id)  # backfill state
+                log.info("Already commented on post %s (platform check). Skipping.", post_id)
+                continue
+        except (moltbook.RateLimitError, moltbook.APIError):
+            pass  # Non-fatal: proceed with state-based check only
 
         # Build a more targeted context for this specific post
         single_post_context = _build_feed_context([post])
@@ -724,13 +754,15 @@ def run_cycle() -> None:
                 synthesis_context += f"\n\nYour operator's current work context:\n{DIRECTION_CONTEXT_NOTES}"
             counter = memory.increment_generation_counter(state)
             try:
-                synthesis = character.generate_content(
+                raw_synthesis = character.generate_content(
                     synthesis_context, "synthesis", counter,
                     recent_posts=memory.get_recent_posts(state),
                 )
+                syn_title, syn_body = _parse_title_and_body(raw_synthesis)
+                synthesis = syn_body if syn_body else raw_synthesis
                 target_submolt = _pick_submolt(synthesis, state)
                 result = moltbook.create_post(
-                    target_submolt, _derive_title(synthesis), synthesis
+                    target_submolt, syn_title, synthesis
                 )
                 memory.record_post(state, str(result.get("id", "synthesis")))
                 memory.record_post_text(state, synthesis)
@@ -749,10 +781,30 @@ def run_cycle() -> None:
     log.info("--- Cycle complete ---")
 
 
-def _derive_title(content: str) -> str:
+def _parse_title_and_body(raw: str) -> tuple[str, str]:
     """
-    Derive a short title from post content.
-    Take the first sentence or first 80 characters, whichever is shorter.
+    Parse LLM output that starts with 'TITLE: ...' into (title, body).
+    Falls back to deriving a title from the first sentence if no TITLE: prefix.
+    """
+    stripped = raw.strip()
+    if stripped.upper().startswith("TITLE:"):
+        # Split on first newline to get the title line
+        first_newline = stripped.find("\n")
+        if first_newline == -1:
+            # Only a title, no body
+            title = stripped[6:].strip()
+            return title[:80] or "Untitled", ""
+        title = stripped[6:first_newline].strip()
+        body = stripped[first_newline:].strip()
+        if title:
+            return title[:80], body
+    # Fallback: derive title from first sentence
+    return _derive_title_fallback(raw), raw
+
+
+def _derive_title_fallback(content: str) -> str:
+    """
+    Fallback title derivation: first sentence, capped at 80 chars.
     """
     first_sentence = content.split(".")[0].strip()
     if len(first_sentence) > 80:
