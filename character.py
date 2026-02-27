@@ -9,8 +9,9 @@ import logging
 import os
 import re
 
-import anthropic
 from dotenv import load_dotenv
+
+import llm
 
 log = logging.getLogger(__name__)
 
@@ -104,31 +105,25 @@ TOOLS = [{
 
 
 def _synthesis_with_tools(system_prompt: str, user_message: str, tavily_key: str) -> str:
-    """Run a synthesis generation with Anthropic tool use and Tavily web search."""
+    """Run a synthesis generation with tool use and Tavily web search."""
     from tavily import TavilyClient
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
     tavily = TavilyClient(api_key=tavily_key)
+
+    def handle_tool(name: str, args: dict) -> str:
+        if name == "web_search":
+            sr = tavily.search(args["query"], max_results=3)
+            return "\n".join(r["content"] for r in sr.get("results", []))
+        return ""
+
     messages = [{"role": "user", "content": user_message}]
-    for _ in range(3):  # max 3 tool rounds
-        resp = client.messages.create(
-            model="claude-sonnet-4-6", system=system_prompt,
-            max_tokens=_MAX_TOKENS, tools=TOOLS, messages=messages
-        )
-        if resp.stop_reason == "end_turn":
-            return next((b.text for b in resp.content if hasattr(b, "text")), "")
-        results = []
-        for block in resp.content:
-            if block.type == "tool_use" and block.name == "web_search":
-                sr = tavily.search(block.input["query"], max_results=3)
-                results.append({
-                    "type": "tool_result", "tool_use_id": block.id,
-                    "content": "\n".join(r["content"] for r in sr.get("results", []))
-                })
-        if not results:
-            break
-        messages += [{"role": "assistant", "content": resp.content},
-                     {"role": "user", "content": results}]
-    return next((b.text for b in resp.content if hasattr(b, "text")), "")
+    return llm.chat_completion_with_tools(
+        system=system_prompt,
+        messages=messages,
+        tools=TOOLS,
+        tool_handler=handle_tool,
+        max_tokens=_MAX_TOKENS,
+        max_rounds=3,
+    )
 
 
 def generate_content(
@@ -200,28 +195,17 @@ def generate_content(
     if post_type == "off_pattern":
         user_message += _OFF_PATTERN_SUFFIX
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY is not set in environment")
-
     # Route synthesis through tool use if Tavily is configured
     tavily_key = os.getenv("TAVILY_API_KEY", "")
     if post_type == "synthesis" and tavily_key:
         return _synthesis_with_tools(SYSTEM_PROMPT, user_message, tavily_key)
 
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
+    return llm.chat_completion(
         system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
         max_tokens=max_tokens,
         temperature=1.0,
-        messages=[{"role": "user", "content": user_message}],
     )
-
-    if response.stop_reason == "max_tokens":
-        log.warning("Generation hit max_tokens ceiling (%d) — output may be truncated", max_tokens)
-
-    return response.content[0].text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -246,10 +230,6 @@ def generate_chat_response(message: str, recent_history: list[dict]) -> str:
     Returns:
         Generated response text.
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY is not set in environment")
-
     system = SYSTEM_PROMPT + _CHAT_SUFFIX
 
     # Build multi-turn messages from history
@@ -263,13 +243,9 @@ def generate_chat_response(message: str, recent_history: list[dict]) -> str:
     # Append the new message
     messages.append({"role": "user", "content": message})
 
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
+    return llm.chat_completion(
         system=system,
+        messages=messages,
         max_tokens=_MAX_TOKENS,
         temperature=1.0,
-        messages=messages,
     )
-
-    return response.content[0].text.strip()

@@ -13,7 +13,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
 import httpx
 from dotenv import load_dotenv
 
@@ -98,19 +97,14 @@ def _log_call(method: str, path: str, status: int, detail: str = "") -> None:
 
 def _solve_challenge(challenge_text: str) -> float:
     """
-    Use Claude Haiku to parse and solve the obfuscated math word problem
+    Use an LLM to parse and solve the obfuscated math word problem
     embedded in a Moltbook verification challenge.
 
     Returns the answer rounded to 2 decimal places.
     """
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not anthropic_key:
-        raise VerificationError("ANTHROPIC_API_KEY not set; cannot solve verification challenge")
+    import llm
 
-    client = anthropic.Anthropic(api_key=anthropic_key)
-    msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=30,
+    answer_str = llm.chat_completion_cheap(
         messages=[
             {
                 "role": "user",
@@ -121,8 +115,8 @@ def _solve_challenge(challenge_text: str) -> float:
                 ),
             }
         ],
+        max_tokens=30,
     )
-    answer_str = msg.content[0].text.strip()
     try:
         return round(float(answer_str), 2)
     except ValueError:
