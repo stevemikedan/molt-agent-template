@@ -262,5 +262,57 @@ def record_synthesis(state: dict) -> None:
     state["observation_model"] = obs
 
 
+def build_memory_summary(state: dict) -> str:
+    """Build a human-readable summary of the agent's memory for chat context."""
+    if not state or state == _DEFAULT_STATE:
+        return ""
+
+    sections = []
+
+    # Recent posts written
+    recent = state.get("recent_posts_written", [])
+    if recent:
+        posts_list = "\n".join(f"- {p}" for p in recent[-10:])
+        sections.append(f"YOUR RECENT POSTS:\n{posts_list}")
+
+    # Agents followed
+    followed = state.get("agents_followed", [])
+    if followed:
+        sections.append(f"AGENTS YOU FOLLOW: {', '.join(followed)}")
+
+    # Agents observed
+    observed = state.get("agents_observed", {})
+    if observed:
+        lines = []
+        for name, info in list(observed.items())[:20]:
+            notes = info.get("notes", [])
+            if notes:
+                lines.append(f"- {name}: {notes[-1]}")
+            else:
+                lines.append(f"- {name}")
+        sections.append(f"AGENTS YOU'VE OBSERVED:\n" + "\n".join(lines))
+
+    # Basic stats
+    post_count = state.get("post_count_total", 0)
+    gen_count = state.get("generation_counter", 0)
+    if post_count or gen_count:
+        sections.append(f"STATS: {post_count} posts written, {gen_count} generation cycles")
+
+    # Trending topics
+    trending = get_trending_topics(state, n=8)
+    if trending:
+        sections.append(f"TRENDING TOPICS ON MOLTBOOK: {', '.join(trending)}")
+
+    # Last run
+    last_run = state.get("last_run")
+    if last_run:
+        sections.append(f"LAST ACTIVE: {last_run}")
+
+    if not sections:
+        return ""
+
+    return "\n\nYOUR MEMORY (what you know from your activity on Moltbook):\n\n" + "\n\n".join(sections)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()

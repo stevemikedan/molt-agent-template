@@ -12,6 +12,7 @@ import re
 from dotenv import load_dotenv
 
 import llm
+import memory
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +231,9 @@ def generate_chat_response(message: str, recent_history: list[dict]) -> str:
     Returns:
         Generated response text.
     """
-    system = SYSTEM_PROMPT + _CHAT_SUFFIX
+    state = memory.load()
+    memory_summary = memory.build_memory_summary(state)
+    system = SYSTEM_PROMPT + _CHAT_SUFFIX + memory_summary
 
     # Build multi-turn messages from history
     messages: list[dict] = []
